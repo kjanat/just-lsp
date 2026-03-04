@@ -17,6 +17,7 @@
 ] @keyword
 
 [
+  "assert"
   "if"
   "else"
 ] @keyword.conditional
@@ -73,6 +74,7 @@
   "*"
   "+"
   "&&"
+  "||"
   "@-"
   "-@"
   "-"
@@ -122,15 +124,18 @@
     "allow-duplicate-variables"
     "dotenv-filename"
     "dotenv-load"
+    "dotenv-override"
     "dotenv-path"
     "dotenv-required"
     "export"
     "fallback"
     "ignore-comments"
     "positional-arguments"
+    "quiet"
+    "script-interpreter"
     "shell"
-    "shell-interpreter"
     "tempdir"
+    "unstable"
     "windows-powershell"
     "windows-shell"
     "working-directory"))
@@ -139,20 +144,26 @@
 (attribute
   (identifier) @attribute
   (#any-of? @attribute
+    "arg"
     "confirm"
+    "default"
     "doc"
     "extension"
     "group"
     "linux"
     "macos"
+    "metadata"
     "no-cd"
     "no-exit-message"
     "no-quiet"
+    "openbsd"
+    "parallel"
     "positional-arguments"
     "private"
     "script"
     "unix"
-    "windows"))
+    "windows"
+    "working-directory"))
 
 ; Numbers are part of the syntax tree, even if disallowed
 (numeric_error) @error
