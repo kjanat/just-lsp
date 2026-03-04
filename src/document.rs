@@ -222,7 +222,19 @@ impl Document {
   ) -> Option<Node<'_>> {
     let tree = self.tree.as_ref()?;
     let point = position.point(self);
-    tree.root_node().descendant_for_point_range(point, point)
+    let node = tree.root_node().descendant_for_point_range(point, point)?;
+    // When a keyword is used as a name (via keyword_identifier aliased to
+    // identifier), descendant_for_point_range returns the anonymous keyword
+    // token (e.g. "export") inside the identifier node.  Callers expect the
+    // named identifier node, so walk up one level when the innermost node is
+    // an anonymous child of an identifier.
+    if !node.is_named()
+      && let Some(parent) = node.parent()
+      && parent.kind() == "identifier"
+    {
+      return Some(parent);
+    }
+    Some(node)
   }
 
   /// Parses the current document contents and updates the cached syntax tree.
@@ -381,6 +393,28 @@ impl Document {
   }
 
   #[must_use]
+  pub(crate) fn unexports(&self) -> Vec<Unexport> {
+    self.tree.as_ref().map_or(Vec::new(), |tree| {
+      tree
+        .root_node()
+        .find_all("unexport")
+        .iter()
+        .filter_map(|unexport_node| {
+          let name_node = unexport_node.child_by_field_name("name")?;
+
+          Some(Unexport {
+            name: TextNode {
+              value: self.get_node_text(&name_node),
+              range: name_node.get_range(self),
+            },
+            range: unexport_node.get_range(self),
+          })
+        })
+        .collect()
+    })
+  }
+
+  #[must_use]
   pub(crate) fn variables(&self) -> Vec<Variable> {
     self.tree.as_ref().map_or(Vec::new(), |tree| {
       tree
@@ -396,7 +430,6 @@ impl Document {
               range: identifier_node.get_range(self),
             },
             export: identifier_node.get_parent("export").is_some(),
-            unexport: identifier_node.get_parent("unexport").is_some(),
             content: self.get_node_text(assignment_node).trim().to_string(),
             range: assignment_node.get_range(self),
           })
@@ -788,7 +821,6 @@ mod tests {
             range: range((0, 0, 0, 6)),
           },
           export: false,
-          unexport: false,
           content: "tmpdir  := `mktemp -d`".into(),
           range: range((0, 0, 1, 0)),
         },
@@ -798,7 +830,7 @@ mod tests {
             range: range((1, 0, 1, 7)),
           },
           export: false,
-          unexport: false,
+
           content: "version := \"0.2.7\"".into(),
           range: range((1, 0, 2, 0)),
         },
@@ -808,7 +840,7 @@ mod tests {
             range: range((2, 0, 2, 6)),
           },
           export: false,
-          unexport: false,
+
           content: "tardir  := tmpdir / \"awesomesauce-\" + version".into(),
           range: range((2, 0, 3, 0)),
         },
@@ -818,7 +850,7 @@ mod tests {
             range: range((3, 0, 3, 7)),
           },
           export: false,
-          unexport: false,
+
           content: "tarball := tardir + \".tar.gz\"".into(),
           range: range((3, 0, 4, 0)),
         },
@@ -828,7 +860,7 @@ mod tests {
             range: range((4, 0, 4, 6)),
           },
           export: false,
-          unexport: false,
+
           content: "config  := quote(config_dir() / \".project-config\")"
             .into(),
           range: range((4, 0, 5, 0)),
@@ -839,7 +871,7 @@ mod tests {
             range: range((5, 7, 5, 13)),
           },
           export: true,
-          unexport: false,
+
           content: "EDITOR := 'nvim'".into(),
           range: range((5, 7, 6, 0)),
         },
@@ -868,7 +900,6 @@ mod tests {
           range: range((1, 7, 1, 11)),
         },
         export: true,
-        unexport: false,
         content: "PATH := '/usr/local/bin'".into(),
         range: range((1, 7, 2, 0)),
       }]
@@ -876,30 +907,76 @@ mod tests {
   }
 
   #[test]
-  fn unexport_variable_is_marked_unexported() {
+  fn get_unexports() {
     let document = Document::from(indoc! {
       "
-      unexport FOO := 'bar'
+      unexport FOO
+      "
+    });
+
+    let unexports = document.unexports();
+
+    assert_eq!(unexports.len(), 1);
+
+    assert_eq!(
+      unexports,
+      vec![Unexport {
+        name: TextNode {
+          value: "FOO".into(),
+          range: range((0, 9, 0, 12)),
+        },
+        range: range((0, 0, 1, 0)),
+      }]
+    );
+  }
+
+  #[test]
+  #[test]
+  fn unexport_as_variable_name_is_variable_not_unexport() {
+    let document = Document::from(indoc! {
+      "
+      unexport := 'foo'
+      "
+    });
+
+    let variables = document.variables();
+    assert_eq!(variables.len(), 1);
+    assert_eq!(variables[0].name.value, "unexport");
+
+    let unexports = document.unexports();
+    assert!(unexports.is_empty());
+  }
+
+  #[test]
+  fn unexport_as_recipe_name_is_recipe_not_unexport() {
+    let document = Document::from(indoc! {
+      "
+      unexport foo:
+        echo 'hello'
+      "
+    });
+
+    let recipes = document.recipes();
+    assert_eq!(recipes.len(), 1);
+    assert_eq!(recipes[0].name.value, "unexport");
+
+    let unexports = document.unexports();
+    assert!(unexports.is_empty());
+  }
+
+  #[test]
+  fn unexport_does_not_produce_variable() {
+    let document = Document::from(indoc! {
+      "
+      unexport FOO
+      bar := 'baz'
       "
     });
 
     let variables = document.variables();
 
     assert_eq!(variables.len(), 1);
-
-    assert_eq!(
-      variables,
-      vec![Variable {
-        name: TextNode {
-          value: "FOO".into(),
-          range: range((0, 9, 0, 12)),
-        },
-        export: false,
-        unexport: true,
-        content: "FOO := 'bar'".into(),
-        range: range((0, 9, 1, 0)),
-      }]
-    );
+    assert_eq!(variables[0].name.value, "bar");
   }
 
   #[test]

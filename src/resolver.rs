@@ -88,6 +88,19 @@ impl<'a> Resolver<'a> {
       }
     }
 
+    if identifier_parent_kind == "unexport" {
+      for variable in self.document.variables() {
+        if variable.name.value == identifier_name {
+          return Some(lsp::Location {
+            uri: self.document.uri.clone(),
+            range: variable.range,
+          });
+        }
+      }
+
+      return None;
+    }
+
     for builtin in BUILTINS {
       match builtin {
         Builtin::Attribute { name, .. }
@@ -225,6 +238,28 @@ impl<'a> Resolver<'a> {
           _ => {}
         }
       }
+    }
+
+    if parent_kind.is_some_and(|kind| kind == "unexport") {
+      for variable in self.document.variables() {
+        if variable.name.value == text {
+          return Some(lsp::Hover {
+            contents: lsp::HoverContents::Markup(lsp::MarkupContent {
+              kind: lsp::MarkupKind::PlainText,
+              value: variable.content,
+            }),
+            range: Some(identifier.get_range(self.document)),
+          });
+        }
+      }
+
+      return Some(lsp::Hover {
+        contents: lsp::HoverContents::Markup(lsp::MarkupContent {
+          kind: lsp::MarkupKind::PlainText,
+          value: format!("unexport {text}"),
+        }),
+        range: Some(identifier.get_range(self.document)),
+      });
     }
 
     for builtin in BUILTINS {
@@ -1428,5 +1463,119 @@ mod tests {
     let nonexistent = root.find("value > identifier").unwrap();
 
     assert!(resolver.resolve_identifier_hover(&nonexistent).is_none());
+  }
+
+  #[test]
+  fn resolve_unexport_definition_to_variable() {
+    let document = Document::from(indoc! {
+      "
+      FOO := \"bar\"
+      unexport FOO
+      "
+    });
+
+    let resolver = Resolver::new(&document);
+
+    let root = document.tree.as_ref().unwrap().root_node();
+
+    let unexport_identifier =
+      root.find("unexport > identifier").unwrap();
+
+    let definition = resolver
+      .resolve_identifier_definition(&unexport_identifier)
+      .unwrap();
+
+    assert_eq!(
+      definition.range,
+      lsp::Range {
+        start: lsp::Position {
+          line: 0,
+          character: 0
+        },
+        end: lsp::Position {
+          line: 1,
+          character: 0
+        },
+      }
+    );
+  }
+
+  #[test]
+  fn resolve_unexport_definition_no_variable() {
+    let document = Document::from(indoc! {
+      "
+      unexport PATH
+      "
+    });
+
+    let resolver = Resolver::new(&document);
+
+    let root = document.tree.as_ref().unwrap().root_node();
+
+    let unexport_identifier =
+      root.find("unexport > identifier").unwrap();
+
+    assert!(
+      resolver
+        .resolve_identifier_definition(&unexport_identifier)
+        .is_none()
+    );
+  }
+
+  #[test]
+  fn resolve_unexport_hover_with_variable() {
+    let document = Document::from(indoc! {
+      "
+      FOO := \"bar\"
+      unexport FOO
+      "
+    });
+
+    let resolver = Resolver::new(&document);
+
+    let root = document.tree.as_ref().unwrap().root_node();
+
+    let unexport_identifier =
+      root.find("unexport > identifier").unwrap();
+
+    let hover = resolver
+      .resolve_identifier_hover(&unexport_identifier)
+      .unwrap();
+
+    assert_eq!(
+      hover.contents,
+      lsp::HoverContents::Markup(lsp::MarkupContent {
+        kind: lsp::MarkupKind::PlainText,
+        value: "FOO := \"bar\"".to_string(),
+      })
+    );
+  }
+
+  #[test]
+  fn resolve_unexport_hover_env_var() {
+    let document = Document::from(indoc! {
+      "
+      unexport PATH
+      "
+    });
+
+    let resolver = Resolver::new(&document);
+
+    let root = document.tree.as_ref().unwrap().root_node();
+
+    let unexport_identifier =
+      root.find("unexport > identifier").unwrap();
+
+    let hover = resolver
+      .resolve_identifier_hover(&unexport_identifier)
+      .unwrap();
+
+    assert_eq!(
+      hover.contents,
+      lsp::HoverContents::Markup(lsp::MarkupContent {
+        kind: lsp::MarkupKind::PlainText,
+        value: "unexport PATH".to_string(),
+      })
+    );
   }
 }

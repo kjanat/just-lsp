@@ -13,6 +13,40 @@ const ESCAPE_SEQUENCE = token(/\\([nrt"\\]|(\r?\n))/);
 // Flags to `/usr/bin/env`, anything that starts with a dash
 const SHEBANG_ENV_FLAG = token(/-\S*/);
 
+// All keywords in just are soft: they can be used as variable names, recipe
+// names, parameter names, etc.  The parser disambiguates via grammar structure
+// (what follows the token), not by reserving keywords.
+//
+// We split them into two groups for the `keyword_identifier` rule:
+//
+// - ITEM_KEYWORDS start top-level items and create GLR conflicts with
+//   assignment/recipe when used as names.
+// - EXPR_KEYWORDS only appear inside expressions; at top level they are
+//   unambiguously names (no keyword-starting rule competes).
+//
+// Both groups are included in `keyword_identifier` so that any keyword can
+// appear wherever an identifier (NAME) is expected.
+const ITEM_KEYWORDS = [
+  "alias",
+  "export",
+  "import",
+  "mod",
+  "set",
+  "unexport",
+];
+
+const EXPR_KEYWORDS = [
+  "assert",
+  "else",
+  "env",
+  "false",
+  "if",
+  "shell",
+  "true",
+];
+
+const ALL_KEYWORDS = [...ITEM_KEYWORDS, ...EXPR_KEYWORDS];
+
 /**
  * Creates a rule to match one or more of the rules separated by a comma
  *
@@ -43,6 +77,19 @@ function array(rule) {
   );
 }
 
+/**
+ * Matches an identifier in a NAME position.  Includes `keyword_identifier`
+ * so that soft keywords (`export`, `set`, `mod`, …) can appear as names.
+ * The alias ensures `keyword_identifier` appears as plain `identifier` in
+ * the parse tree, so LSP code doesn't need to special-case it.
+ *
+ * @param {GrammarSymbols<string>} $
+ * @return {ChoiceRule}
+ */
+function name($) {
+  return choice($.identifier, alias($.keyword_identifier, $.identifier));
+}
+
 module.exports = grammar({
   name: "just",
 
@@ -64,7 +111,32 @@ module.exports = grammar({
     $._raw_string_indented,
     $._expression_recurse,
   ],
+
   word: ($) => $.identifier,
+
+  // GLR conflicts: when a keyword appears at the start of a line, the parser
+  // forks — one branch tries the keyword-specific rule (e.g. $.unexport),
+  // the other treats it as a name in $.assignment or $.recipe_header.
+  // The ambiguity resolves as soon as the next token(s) are seen.
+  conflicts: ($) => [
+    // keyword_identifier conflicts: when a keyword appears after another
+    // keyword token (e.g. `alias alias := ...`), the parser must decide
+    // whether to commit it as keyword_identifier (name within the rule)
+    // or as a new top-level keyword.
+    [$.keyword_identifier, $.alias],
+    [$.keyword_identifier, $.export],
+    [$.keyword_identifier, $.unexport],
+    [$.keyword_identifier, $.import],
+    [$.keyword_identifier, $.module],
+    [$.keyword_identifier, $.setting],
+    // Expression-keyword conflicts: `assert` could be keyword_identifier
+    // (as a name) or start of assert_expression; similarly for if.
+    [$.keyword_identifier, $.assert_expression],
+    [$.keyword_identifier, $.if_expression],
+    // if-expression dangling-else: `else` after braced_expr could be
+    // else_clause, else_if_clause, or end of the if_expression.
+    [$.if_expression],
+  ],
 
   rules: {
     // justfile      : item* EOF
@@ -91,58 +163,67 @@ module.exports = grammar({
         $.setting,
       ),
 
-    // alias         : 'alias' NAME ':=' NAME
-    //               | 'alias' NAME ':=' module_path
+    // keyword_identifier: allows any keyword to appear where NAME is expected.
+    // Used via name($) which aliases this entire node to `identifier`, so
+    // LSP code and queries see a uniform node type.
+    keyword_identifier: (_) => choice(...ALL_KEYWORDS),
+
+    // alias         : 'alias' NAME ':=' target eol
+    // target        : NAME ('::' NAME)*
+    // Dynamic precedence: prefer `alias NAME := target` over a recipe named
+    // "alias" when both parses are valid.
     alias: ($) =>
-      seq(
+      prec.dynamic(1, seq(
         repeat($.attribute),
         "alias",
-        field("left", $.identifier),
+        field("left", name($)),
         ":=",
-        field("right", choice($.module_path, $.identifier)),
-      ),
+        field("right", choice($.module_path, name($))),
+      )),
 
     // module_path   : NAME '::' NAME ('::' NAME)*
     module_path: ($) =>
-      seq($.identifier, repeat1(seq("::", $.identifier))),
-    // assignment    : attribute* NAME ':=' expression _eol
+      seq(name($), repeat1(seq("::", name($)))),
+
+    // assignment    : attribute* NAME ':=' expression eol
     assignment: ($) =>
       seq(
         repeat($.attribute),
-        field("left", $.identifier),
+        field("left", name($)),
         ":=",
         field("right", $.expression),
         $._newline,
       ),
 
     // export        : attribute* 'export' assignment
-    export: ($) => seq(repeat($.attribute), "export", $.assignment),
+    export: ($) => prec.dynamic(1, seq(repeat($.attribute), "export", $.assignment)),
 
-    // unexport      : attribute* 'unexport' assignment
-    unexport: ($) => seq(repeat($.attribute), "unexport", $.assignment),
+    // unexport      : 'unexport' NAME eol
+    unexport: ($) => prec.dynamic(1, seq("unexport", field("name", name($)), $._newline)),
 
-    // import        : 'import' '?'? string?
-    import: ($) => seq("import", optional("?"), $.string),
+    // import        : 'import' '?'? string? eol
+    import: ($) => prec.dynamic(1, seq("import", optional("?"), optional($.string))),
 
-    // module        : attribute* 'mod' '?'? string?
+    // module        : attribute* 'mod' '?'? NAME string? eol
     module: ($) =>
-      seq(
+      prec.dynamic(1, seq(
         repeat($.attribute),
         "mod",
         optional("?"),
-        field("name", $.identifier),
+        field("name", name($)),
         optional($.string),
-      ),
+      )),
 
-    // setting       : 'set' 'dotenv-load' boolean?
-    //               | 'set' 'export' boolean?
-    //               | 'set' 'positional-arguments' boolean?
-    //               | 'set' 'shell' ':=' '[' string (',' string)* ','? ']'
+    // setting       : 'set' NAME (':=' (boolean | string | string_list))? eol
+    //               | 'set' 'shell' ':=' string_list eol
+    //
+    // Dynamic precedence ensures `set NAME` is preferred as a setting over
+    // a recipe named "set" with NAME as a parameter.
     setting: ($) =>
-      choice(
+      prec.dynamic(1, choice(
         seq(
           "set",
-          field("left", $.identifier),
+          field("left", name($)),
           field(
             "right",
             optional(seq(":=", choice($.boolean, $.string, array($.string)))),
@@ -150,12 +231,18 @@ module.exports = grammar({
           $._newline,
         ),
         seq("set", "shell", ":=", field("right", array($.string)), $._newline),
-      ),
+      )),
 
     // boolean       : ':=' ('true' | 'false')
     boolean: (_) => choice("true", "false"),
 
-    // expression    : 'if' condition '{' expression '}' 'else' '{' expression '}'
+    // expression    : disjunct '||' expression
+    //               | disjunct
+    // disjunct      : conjunct '&&' disjunct
+    //               | conjunct
+    // conjunct      : 'if' condition '{' expression '}' 'else' '{' expression '}'
+    //               | 'assert' '(' condition ',' expression ')'
+    //               | '/' expression
     //               | value '/' expression
     //               | value '+' expression
     //               | value
@@ -164,6 +251,9 @@ module.exports = grammar({
     _expression_inner: ($) =>
       choice(
         $.if_expression,
+        $.assert_expression,
+        prec.left(4, seq($._expression_recurse, "||", $._expression_recurse)),
+        prec.left(3, seq($._expression_recurse, "&&", $._expression_recurse)),
         prec.left(2, seq($._expression_recurse, "+", $._expression_recurse)),
         prec.left(1, seq($._expression_recurse, "/", $._expression_recurse)),
         $.value,
@@ -180,6 +270,16 @@ module.exports = grammar({
         field("consequence", $._braced_expr),
         repeat(field("alternative", $.else_if_clause)),
         optional(field("alternative", $.else_clause)),
+      ),
+
+    assert_expression: ($) =>
+      seq(
+        "assert",
+        "(",
+        field("condition", $.condition),
+        ",",
+        field("message", $.expression),
+        ")",
       ),
 
     else_if_clause: ($) => seq("else", "if", $.condition, $._braced_expr),
@@ -214,7 +314,7 @@ module.exports = grammar({
         choice(
           $.function_call,
           $.external_command,
-          $.identifier,
+          name($),
           $.string,
           $.numeric_error,
           seq("(", $.expression, ")"),
@@ -223,7 +323,7 @@ module.exports = grammar({
 
     function_call: ($) =>
       seq(
-        field("name", $.identifier),
+        field("name", name($)),
         "(",
         optional(field("arguments", $.sequence)),
         ")",
@@ -241,9 +341,9 @@ module.exports = grammar({
         "[",
         comma_sep1(
           choice(
-            $.identifier,
+            name($),
             seq(
-              $.identifier,
+              name($),
               "(",
               field("argument", comma_sep1(choice(
                 $.string,
@@ -251,7 +351,7 @@ module.exports = grammar({
               ))),
               ")",
             ),
-            seq($.identifier, ":", field("argument", $.string)),
+            seq(name($), ":", field("argument", $.string)),
           ),
         ),
         "]",
@@ -261,12 +361,12 @@ module.exports = grammar({
     // Named parameter in attribute: key='value' or just key (flag)
     attribute_named_param: ($) =>
       seq(
-        field("name", $.identifier),
+        field("name", name($)),
         optional(seq("=", field("value", $.string))),
       ),
 
     // A complete recipe
-    // recipe        : attribute? '@'? NAME parameter* variadic_parameters? ':' dependency* body?
+    // recipe        : attributes* '@'? NAME parameter* variadic? ':' dependencies eol body?
     recipe: ($) =>
       seq(
         repeat($.attribute),
@@ -278,7 +378,7 @@ module.exports = grammar({
     recipe_header: ($) =>
       seq(
         optional("@"),
-        field("name", $.identifier),
+        field("name", name($)),
         optional($.parameters),
         ":",
         optional($.dependencies),
@@ -287,31 +387,29 @@ module.exports = grammar({
     parameters: ($) =>
       seq(repeat($.parameter), choice($.parameter, $.variadic_parameter)),
 
-    // FIXME: do we really have leading `$`s here?`
     // parameter     : '$'? NAME
     //               | '$'? NAME '=' value
     parameter: ($) =>
       seq(
         optional("$"),
-        field("name", $.identifier),
+        field("name", name($)),
         optional(seq("=", field("default", $.value))),
       ),
 
-    // variadic_parameters      : '*' parameter
+    // variadic      : '*' parameter
     //               | '+' parameter
     variadic_parameter: ($) =>
       seq(field("kleene", choice("*", "+")), $.parameter),
 
     dependencies: ($) => repeat1(seq(optional("&&"), $.dependency)),
 
-    // dependency    : NAME
-    //               | module_path
-    //               | '(' NAME expression* ')'
-    //               | '(' module_path expression* ')'
+    // dependency    : target
+    //               | '(' target expression* ')'
+    // target        : NAME ('::' NAME)*
     dependency: ($) =>
       choice(
         field("name", $.module_path),
-        field("name", $.identifier),
+        field("name", name($)),
         $.dependency_expression,
       ),
 
@@ -319,7 +417,7 @@ module.exports = grammar({
     dependency_expression: ($) =>
       seq(
         "(",
-        field("name", choice($.module_path, $.identifier)),
+        field("name", choice($.module_path, name($))),
         repeat($.expression),
         ")",
       ),
@@ -357,10 +455,10 @@ module.exports = grammar({
     // Fallback shebang, any string
     _opaque_shebang: (_) => /[^/\n]+/,
 
-    // string        : STRING
-    //               | INDENTED_STRING
-    //               | RAW_STRING
-    //               | INDENTED_RAW_STRING
+    // string        : 'x'? STRING
+    //               | 'x'? INDENTED_STRING
+    //               | 'x'? RAW_STRING
+    //               | 'x'? INDENTED_RAW_STRING
     string: ($) =>
       choice(
         $._string_indented,
@@ -368,6 +466,11 @@ module.exports = grammar({
         $._string,
         // _raw_string, can't be written as a separate inline for osm reason
         /'[^']*'/,
+        // executable string variants (x prefix)
+        seq("x", $._string_indented),
+        seq("x", $._raw_string_indented),
+        seq("x", $._string),
+        seq("x", /'[^']*'/),
       ),
 
     _raw_string_indented: (_) => seq("'''", repeat(/./), "'''"),

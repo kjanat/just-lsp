@@ -128,6 +128,7 @@ pub(crate) struct RuleContext<'a> {
   recipe_parameters: OnceLock<HashMap<String, Vec<Parameter>>>,
   recipes: OnceLock<Vec<Recipe>>,
   settings: OnceLock<Vec<Setting>>,
+  unexports: OnceLock<Vec<Unexport>>,
   variable_and_builtin_names: OnceLock<HashSet<String>>,
   variables: OnceLock<Vec<Variable>>,
 }
@@ -261,6 +262,7 @@ impl<'a> RuleContext<'a> {
       recipe_parameters: OnceLock::new(),
       recipes: OnceLock::new(),
       settings: OnceLock::new(),
+      unexports: OnceLock::new(),
       variable_and_builtin_names: OnceLock::new(),
       variables: OnceLock::new(),
     }
@@ -321,6 +323,13 @@ impl<'a> RuleContext<'a> {
 
   pub(crate) fn tree(&self) -> Option<&Tree> {
     self.document.tree.as_ref()
+  }
+
+  pub(crate) fn unexports(&self) -> &[Unexport] {
+    self
+      .unexports
+      .get_or_init(|| self.document.unexports())
+      .as_slice()
   }
 
   pub(crate) fn unresolved_identifiers(&self) -> &[UnresolvedIdentifier] {

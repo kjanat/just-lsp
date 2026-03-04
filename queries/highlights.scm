@@ -5,6 +5,7 @@
 [
   "export"
   "import"
+  "unexport"
 ] @keyword.import
 
 "mod" @module
@@ -24,6 +25,9 @@
 
 (value
   (identifier) @variable)
+
+(unexport
+  name: (identifier) @variable)
 
 (alias
   left: (identifier) @variable)

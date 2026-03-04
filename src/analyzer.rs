@@ -45,7 +45,7 @@ impl<'a> Analyzer<'a> {
 
 #[cfg(test)]
 mod tests {
-  use {super::*, Message::*, indoc::indoc, pretty_assertions::assert_eq};
+  use {super::*, indoc::indoc, pretty_assertions::assert_eq, Message::*};
 
   type RangeSpec = (u32, u32, u32, u32);
 
@@ -1657,11 +1657,11 @@ mod tests {
   }
 
   #[test]
-  fn unexported_variables_warned() {
+  fn unexport_does_not_warn() {
     Test::new(indoc! {
       "
       foo := \"unused value\"
-      unexport BAR := \"unexported but unused\"
+      unexport BAR
       baz := \"used value\"
 
       recipe:
@@ -1669,7 +1669,6 @@ mod tests {
       "
     })
     .warning(Message::Text("Variable `foo` appears unused"))
-    .warning(Message::Text("Variable `BAR` appears unused"))
     .run();
   }
 
@@ -2082,6 +2081,67 @@ mod tests {
     .error(Message::Text(
       "Recipe `z` has circular dependency `z -> x -> y -> z`",
     ))
+    .run();
+  }
+
+  #[test]
+  fn duplicate_unexport() {
+    Test::new(indoc! {
+      "
+      unexport FOO
+      unexport FOO
+      "
+    })
+    .error(Message::Text("Variable `FOO` is unexported multiple times"))
+    .run();
+  }
+
+  #[test]
+  fn duplicate_unexport_different_names() {
+    Test::new(indoc! {
+      "
+      unexport FOO
+      unexport BAR
+      "
+    })
+    .run();
+  }
+
+  #[test]
+  fn export_unexport_conflict() {
+    Test::new(indoc! {
+      "
+      export FOO := \"bar\"
+      unexport FOO
+      "
+    })
+    .error(Message::Text(
+      "Variable FOO is both exported and unexported",
+    ))
+    .run();
+  }
+
+  #[test]
+  fn unexport_non_exported_variable_no_conflict() {
+    Test::new(indoc! {
+      "
+      FOO := \"bar\"
+      unexport FOO
+
+      recipe:
+        echo {{ FOO }}
+      "
+    })
+    .run();
+  }
+
+  #[test]
+  fn unexport_env_var_no_conflict() {
+    Test::new(indoc! {
+      "
+      unexport PATH
+      "
+    })
     .run();
   }
 }

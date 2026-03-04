@@ -45,6 +45,7 @@ use {
   subcommand::Subcommand,
   tempfile::tempdir,
   text_node::TextNode,
+  unexport::Unexport,
   tokio::{io::AsyncBufReadExt, sync::RwLock},
   tokio_stream::{StreamExt, wrappers::LinesStream},
   tower_lsp::{Client, LanguageServer, LspService, jsonrpc, lsp_types as lsp},
@@ -84,6 +85,7 @@ mod str_ext;
 mod subcommand;
 mod text_node;
 mod tokenizer;
+mod unexport;
 mod variable;
 
 type Result<T = (), E = Error> = std::result::Result<T, E>;
